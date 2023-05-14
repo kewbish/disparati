@@ -17,7 +17,6 @@ var (
 )
 
 func main() {
-	// https://pages.cs.wisc.edu/~tvrdik/13/html/Section13.html
 	n := maelstrom.NewNode()
 	broadcasted = make(map[interface{}]bool)
 	received = make(map[interface{}]bool)
@@ -30,7 +29,6 @@ func main() {
 
 		valMutex.Lock()
 		received[body["message"]] = true
-		valMutex.Unlock()
 
 		_, hasBroadcasted := broadcasted[body["message"]]
 		if topology != nil && !hasBroadcasted {
@@ -38,8 +36,9 @@ func main() {
 			for _, neighbour := range neighbours {
 				n.Send(neighbour.(string), body)
 			}
+			broadcasted[body["message"]] = true
 		}
-		broadcasted[body["message"]] = true
+		valMutex.Unlock()
 
 		body = make(map[string]any)
 		body["type"] = "broadcast_ok"
@@ -66,10 +65,12 @@ func main() {
 		if err := json.Unmarshal(msg.Body, &body); err != nil {
 			return err
 		}
+
 		topMutex.Lock()
 		topology = body["topology"].(map[string]interface{})
 		topMutex.Unlock()
 
+		valMutex.Lock()
 		neighbours, _ := topology[n.ID()].([]interface{})
 		for k := range received {
 			_, hasBroadcast := broadcasted[k]
@@ -81,6 +82,7 @@ func main() {
 			}
 			broadcasted[k] = true
 		}
+		valMutex.Unlock()
 
 		body = make(map[string]any)
 		body["type"] = "topology_ok"
