@@ -1,4 +1,2 @@
-github.com/emirpasic/gods v1.18.1 h1:FXtiHYKDGKCW2KzwZKx0iC0PQmdlorYgdFG9jPXJ1Bc=
-github.com/emirpasic/gods v1.18.1/go.mod h1:8tpGGwCnJ5H4r6BWwaV6OrWmMoPhUl5jm/FMNAnJvWQ=
 github.com/jepsen-io/maelstrom/demo/go v0.0.0-20230424133947-f6f4fd0d64fe h1:gjKUfpOmJUEq3HgWI6fVDE5pvcVs/wqI2g9B5ppm+so=
 github.com/jepsen-io/maelstrom/demo/go v0.0.0-20230424133947-f6f4fd0d64fe/go.mod h1:i6aVIs5AIOOaQF1lAisBm7DDeWM1Iopf+26UxjagsCU=
