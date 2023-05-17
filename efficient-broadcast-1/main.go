@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/emirpasic/gods/trees/btree"
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
 
@@ -13,6 +14,7 @@ var (
 	received    map[interface{}]bool
 	broadcasted map[interface{}]bool
 	valMutex    sync.Mutex
+	tree        btree.Tree
 )
 
 func main() {
@@ -27,50 +29,28 @@ func main() {
 		}
 
 		valMutex.Lock()
-		_, isSingle := body["message"]
-		if isSingle {
-			received[body["message"]] = true
-		} else {
-			for m := range body["messages"].([]interface{}) {
-				received[m] = true
+		received[body["message"]] = true
+
+		_, hasBroadcasted := broadcasted[body["message"]]
+		if !hasBroadcasted {
+			neighbours := getNeighbours(n.ID())
+			newBody := body
+			for _, neighbour := range neighbours {
+				neighbour := neighbour
+				go func() {
+					err := n.Send(neighbour, newBody)
+					for err != nil {
+						time.Sleep(time.Second)
+						err = n.Send(neighbour, newBody)
+					}
+				}()
 			}
+			broadcasted[body["message"]] = true
 		}
 		valMutex.Unlock()
 
-		go func() {
-			body := body
-			for {
-				var toBroadcast []interface{}
-				for k := range received {
-					_, hasBroadcasted := broadcasted[body["message"]]
-					if !hasBroadcasted {
-						toBroadcast = append(toBroadcast, k)
-					}
-				}
-				neighbours := getNeighbours(n.NodeIDs(), index(n.NodeIDs(), n.ID()))
-				newBody := body
-				delete(newBody, "message")
-				newBody["messages"] = toBroadcast
-				for _, neighbour := range neighbours {
-					neighbour := neighbour
-					go func() {
-						err := n.Send(neighbour, newBody)
-						for err != nil {
-							time.Sleep(time.Second)
-							err = n.Send(neighbour, newBody)
-						}
-					}()
-				}
-				for m := range toBroadcast {
-					broadcasted[m] = true
-				}
-				time.Sleep(300 * time.Millisecond)
-			}
-		}()
-
 		body = make(map[string]any)
 		body["type"] = "broadcast_ok"
-
 		return n.Reply(msg, body)
 	})
 
@@ -89,9 +69,24 @@ func main() {
 	})
 
 	n.Handle("topology", func(msg maelstrom.Message) error {
-		body := make(map[string]any)
-		body["type"] = "topology_ok"
-		return n.Reply(msg, body)
+		var body map[string]any
+		if err := json.Unmarshal(msg.Body, &body); err != nil {
+			return err
+		}
+
+		list := n.NodeIDs()
+		tree := btree.NewWithIntComparator(len(list))
+		for i := 0; i < len(list); i++ {
+			tree.Put(i, list[i])
+		}
+
+		go func() {
+			body := make(map[string]any)
+			body["type"] = "topology_ok"
+			n.Reply(msg, body)
+		}()
+
+		return nil
 	})
 
 	if err := n.Run(); err != nil {
@@ -99,25 +94,19 @@ func main() {
 	}
 }
 
-func getNeighbours(list []string, index int) []string {
-	var neighbours []string
-	if index > 0 {
-		neighbours = append(neighbours, list[(index-1)/10])
-	}
-	for i := 0; i < 10; i++ {
-		if (10*index + i + 1) < len(list) {
-			neighbours = append(neighbours, list[10*index+i+1])
-		}
-	}
-	return neighbours
-}
+func getNeighbours(index string) []string {
+	cNode := tree.GetNode(index)
 
-// why no built-in :(
-func index(slice []string, item string) int {
-	for i := range slice {
-		if slice[i] == item {
-			return i
+	var neighbours []string
+	if cNode.Parent != nil {
+		neighbours = append(neighbours, cNode.Parent.Entries[0].Value.(string))
+	}
+
+	for _, children := range cNode.Children {
+		for _, entry := range children.Entries {
+			neighbours = append(neighbours, entry.Value.(string))
 		}
 	}
-	return -1
+
+	return neighbours
 }
