@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"log"
 	"sync"
-	"time"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
@@ -27,46 +26,24 @@ func main() {
 		}
 
 		valMutex.Lock()
-		_, isSingle := body["message"]
-		if isSingle {
-			received[body["message"]] = true
-		} else {
-			for m := range body["messages"].([]interface{}) {
-				received[m] = true
+		received[body["message"]] = true
+
+		_, hasBroadcasted := broadcasted[body["message"]]
+		if !hasBroadcasted {
+			neighbours := getNeighbours(n.NodeIDs(), index(n.NodeIDs(), n.ID()))
+			newBody := body
+			for _, neighbour := range neighbours {
+				neighbour := neighbour
+				go func() {
+					err := n.Send(neighbour, newBody)
+					for err != nil {
+						err = n.Send(neighbour, newBody)
+					}
+				}()
 			}
+			broadcasted[body["message"]] = true
 		}
 		valMutex.Unlock()
-
-		go func() {
-			body := body
-			for {
-				var toBroadcast []interface{}
-				for k := range received {
-					_, hasBroadcasted := broadcasted[body["message"]]
-					if !hasBroadcasted {
-						toBroadcast = append(toBroadcast, k)
-					}
-				}
-				neighbours := getNeighbours(n.NodeIDs(), index(n.NodeIDs(), n.ID()))
-				newBody := body
-				delete(newBody, "message")
-				newBody["messages"] = toBroadcast
-				for _, neighbour := range neighbours {
-					neighbour := neighbour
-					go func() {
-						err := n.Send(neighbour, newBody)
-						for err != nil {
-							time.Sleep(time.Second)
-							err = n.Send(neighbour, newBody)
-						}
-					}()
-				}
-				for m := range toBroadcast {
-					broadcasted[m] = true
-				}
-				time.Sleep(300 * time.Millisecond)
-			}
-		}()
 
 		body = make(map[string]any)
 		body["type"] = "broadcast_ok"
@@ -89,7 +66,33 @@ func main() {
 	})
 
 	n.Handle("topology", func(msg maelstrom.Message) error {
-		body := make(map[string]any)
+		var body map[string]any
+		if err := json.Unmarshal(msg.Body, &body); err != nil {
+			return err
+		}
+
+		valMutex.Lock()
+		neighbours := getNeighbours(n.NodeIDs(), index(n.NodeIDs(), n.ID()))
+		for k := range received {
+			_, hasBroadcast := broadcasted[k]
+			if hasBroadcast {
+				continue
+			}
+			for _, neighbour := range neighbours {
+				neighbour := neighbour
+				newBody := body
+				go func() {
+					err := n.Send(neighbour, newBody)
+					for err != nil {
+						err = n.Send(neighbour, newBody)
+					}
+				}()
+			}
+			broadcasted[k] = true
+		}
+		valMutex.Unlock()
+
+		body = make(map[string]any)
 		body["type"] = "topology_ok"
 		return n.Reply(msg, body)
 	})
@@ -102,11 +105,11 @@ func main() {
 func getNeighbours(list []string, index int) []string {
 	var neighbours []string
 	if index > 0 {
-		neighbours = append(neighbours, list[(index-1)/10])
+		neighbours = append(neighbours, list[(index-1)/5])
 	}
-	for i := 0; i < 10; i++ {
-		if (10*index + i + 1) < len(list) {
-			neighbours = append(neighbours, list[10*index+i+1])
+	for i := 0; i < 5; i++ {
+		if (5*index + i) < len(list) {
+			neighbours = append(neighbours, list[5*index+i])
 		}
 	}
 	return neighbours
