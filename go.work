@@ -1,0 +1,12 @@
+go 1.20
+
+use (
+	./echo
+	./unique-id-generation
+	./single-node-broadcast
+	./multi-node-broadcast
+	./fault-tolerant-broadcast
+	./efficient-broadcast-1
+	./g-set
+	./g-counter
+)
