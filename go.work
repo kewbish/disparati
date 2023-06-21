@@ -5,8 +5,6 @@ use (
 	./unique-id-generation
 	./single-node-broadcast
 	./multi-node-broadcast
-	./fault-tolerant-broadcast
-	./efficient-broadcast-1
 	./g-set
 	./g-counter
 )
