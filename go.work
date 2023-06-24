@@ -9,4 +9,5 @@ use (
 	./g-set
 	./g-counter
 	./pn-counter
+	./datomic
 )
