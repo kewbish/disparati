@@ -8,6 +8,7 @@ use (
 	./fault-tolerant-broadcast
 	./g-set
 	./g-counter
+	./g-counter-seq-kv
 	./pn-counter
 	./datomic
 )
