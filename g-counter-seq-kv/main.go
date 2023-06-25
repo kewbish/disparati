@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"sync"
+	"time"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
@@ -14,9 +15,12 @@ func main() {
 	kv := maelstrom.NewSeqKV(n)
 	var mx sync.Mutex
 	cache := make(map[string]int)
+	timeout := 500 * time.Millisecond
 
 	n.Handle("init", func(msg maelstrom.Message) error {
-		if err := kv.Write(context.Background(), n.ID(), 0); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		if err := kv.Write(ctx, n.ID(), 0); err != nil {
 			log.Default().Fatal(err)
 			return err
 		}
@@ -27,7 +31,9 @@ func main() {
 		finalCounter := 0
 		for _, id := range n.NodeIDs() {
 			if id == n.ID() {
-				value, err := kv.ReadInt(context.Background(), n.ID())
+				ctx, cancel := context.WithTimeout(context.Background(), timeout)
+				value, err := kv.ReadInt(ctx, n.ID())
+				defer cancel()
 				if err != nil {
 					finalCounter += cache[n.ID()]
 				} else {
@@ -36,7 +42,9 @@ func main() {
 				}
 
 			} else {
-				value, err := n.SyncRPC(context.Background(), id, map[string]any{"type": "update_from_local"})
+				ctx, cancel := context.WithTimeout(context.Background(), timeout)
+				value, err := n.SyncRPC(ctx, id, map[string]any{"type": "update_from_local"})
+				defer cancel()
 				if err != nil {
 					finalCounter += cache[n.ID()]
 				} else {
@@ -66,11 +74,15 @@ func main() {
 		}
 
 		mx.Lock()
-		value, err := kv.ReadInt(context.Background(), n.ID())
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		value, err := kv.ReadInt(ctx, n.ID())
+		defer cancel()
 		if err != nil {
 			value = 0
 		}
-		err = kv.Write(context.Background(), n.ID(), value+int(body["delta"].(float64)))
+		ctx, cancel_another := context.WithTimeout(context.Background(), timeout)
+		err = kv.Write(ctx, n.ID(), value+int(body["delta"].(float64)))
+		defer cancel_another()
 		mx.Unlock()
 
 		body = make(map[string]any)
@@ -80,7 +92,9 @@ func main() {
 	})
 
 	n.Handle("update_from_local", func(msg maelstrom.Message) error {
-		value, err := kv.ReadInt(context.Background(), n.ID())
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		value, err := kv.ReadInt(ctx, n.ID())
+		defer cancel()
 		if err != nil {
 			return err
 		}
