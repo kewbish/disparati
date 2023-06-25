@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"log"
-	"sync"
 	"time"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
@@ -13,7 +12,6 @@ import (
 func main() {
 	n := maelstrom.NewNode()
 	kv := maelstrom.NewSeqKV(n)
-	var mx sync.Mutex
 	cache := make(map[string]int)
 	timeout := 500 * time.Millisecond
 
@@ -73,7 +71,6 @@ func main() {
 			return err
 		}
 
-		mx.Lock()
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		value, err := kv.ReadInt(ctx, n.ID())
 		defer cancel()
@@ -83,7 +80,6 @@ func main() {
 		ctx, cancel_another := context.WithTimeout(context.Background(), timeout)
 		err = kv.Write(ctx, n.ID(), value+int(body["delta"].(float64)))
 		defer cancel_another()
-		mx.Unlock()
 
 		body = make(map[string]any)
 		body["type"] = "add_ok"
