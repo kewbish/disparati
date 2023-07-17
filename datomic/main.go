@@ -11,11 +11,13 @@ import (
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
 
+var timeout time.Duration = 500 * time.Millisecond
+
 func main() {
 	n := maelstrom.NewNode()
 	kv := maelstrom.NewLinKV(n)
-	timeout := 500 * time.Millisecond
 	var mx sync.Mutex
+	thunkMap := new(Map)
 
 	n.Handle("txn", func(msg maelstrom.Message) error {
 		var body map[string]any
@@ -23,54 +25,47 @@ func main() {
 			return err
 		}
 		transaction := body["txn"].([]interface{})
-		new_transaction := make([][]interface{}, 0)
 		mx.Lock()
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		current_store_json, err := kv.Read(ctx, "root")
 		defer cancel()
-		var current_store map[string][]interface{}
-		if err != nil || current_store_json == nil {
-			current_store = make(map[string][]interface{})
-		} else {
-			if err := json.Unmarshal([]byte(current_store_json.(string)), &current_store); err != nil {
-				current_store = make(map[string][]interface{})
-			}
+		value, err := kv.Read(ctx, "root")
+		if err != nil {
+			return err
 		}
+		thunkMap.fromJSON(n, kv, value.([]byte))
 
+		newThunkMap := Map{n, kv, make(map[any]*Thunk)}
+		new_transaction := make([][]interface{}, 0)
 		for _, mop := range transaction {
 			mop := mop
-			new_store := deepCopyStore(current_store)
 			mop_interface := mop.([]interface{})
 			action, key, value := mop_interface[0], mop_interface[1], mop_interface[2]
-			skey := fmt.Sprintf("%d", int64(key.(float64)))
 
-			current_value, exists := new_store[skey]
 			new_mop := make([]interface{}, 3)
 			new_mop[0] = action
 			new_mop[1] = key
 			switch action {
 			case "r":
-				new_mop[2] = current_value
+				new_mop[2] = newThunkMap.internalMap[key]
 			case "append":
-				fallthrough
-			default:
-				if !exists {
-					current_value = make([]interface{}, 0)
-				}
-				new_value := make([]interface{}, len(current_value))
-				copy(new_value, current_value)
+				new_value := make([]interface{}, len(newThunkMap.internalMap[key].value.([]any)))
+				copy(new_value, newThunkMap.internalMap[key].value.([]any))
 				new_value = append(new_value, value)
-				new_store[skey] = new_value
-				log.Default().Print(current_value, new_value, new_store[skey])
-				new_mop[2] = value
-
+				thunk := newThunk(n, kv, fmt.Sprintf("%s-%d", n.ID(), globalIDG.newID()), new_value, false)
+				newInternalMap := make(map[any]*Thunk)
+				for k, v := range newThunkMap.internalMap {
+					newInternalMap[k] = v
+				}
+				newInternalMap[key] = thunk
+				newThunkMap.internalMap = newInternalMap
 			}
 			new_transaction = append(new_transaction, new_mop)
-			current_store = new_store
 		}
-		new_json, err := json.Marshal(current_store)
+
+		newThunkMap.save()
+
 		ctx, cancel_another := context.WithTimeout(context.Background(), timeout)
-		kv.CompareAndSwap(context.Background(), "root", current_store_json, string(new_json), true) // TODO - add retry
+		kv.CompareAndSwap(context.Background(), "root", thunkMap.toJSON(), newThunkMap.toJSON(), true) // TODO - add retry
 		defer cancel_another()
 		mx.Unlock()
 
@@ -86,12 +81,90 @@ func main() {
 	}
 }
 
-func deepCopyStore(store map[string][]interface{}) map[string][]interface{} {
-	new_store := make(map[string][]interface{})
-	for k, v := range store {
-		copied_slice := make([]interface{}, len(v))
-		copy(copied_slice, v)
-		new_store[k] = copied_slice
+type IDGenerator struct {
+	lock  *sync.Mutex
+	index int64
+}
+
+var globalIDG IDGenerator = IDGenerator{new(sync.Mutex), 0}
+
+func (idg IDGenerator) newID() int64 {
+	idg.lock.Lock()
+	idg.index += 1
+	idg.lock.Unlock()
+	return idg.index
+}
+
+type Thunk struct {
+	node  *maelstrom.Node
+	kv    *maelstrom.KV
+	id    string
+	value any
+	saved bool
+}
+
+func newThunk(node *maelstrom.Node, kv *maelstrom.KV, id string, value any, saved bool) *Thunk {
+	thunk := new(Thunk)
+	*thunk = Thunk{node, kv, id, value, saved}
+	return thunk
+}
+
+func (t Thunk) getThunkID() string {
+	if t.id != "" {
+		return t.id
 	}
-	return new_store
+	return fmt.Sprintf("%s-%d", (*t.node).ID(), globalIDG.newID())
+}
+
+func (t Thunk) getThunkValue() any {
+	contextWithTimeout, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	value, err := t.kv.Read(contextWithTimeout, t.id)
+	if err != nil {
+		return nil
+	}
+	t.value = value
+	return value
+}
+
+func (t Thunk) saveThunkValue() {
+	contextWithTimeout, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	err := t.kv.Write(contextWithTimeout, t.id, t.value)
+	if err == nil {
+		t.saved = true
+	}
+}
+
+type Map struct {
+	node        *maelstrom.Node
+	kv          *maelstrom.KV
+	internalMap map[any]*Thunk
+}
+
+func (Map) fromJSON(node *maelstrom.Node, kv *maelstrom.KV, jsonString []byte) *Map {
+	newMap := new(Map)
+	newMap.node = node
+	newMap.internalMap = make(map[any]*Thunk)
+	var pairs [][]any
+	json.Unmarshal(jsonString, &pairs)
+	for _, pair := range pairs {
+		newMap.internalMap[pair[0]] = newThunk(node, kv, pair[1].(string), nil, true)
+	}
+	return newMap
+}
+
+func (m Map) toJSON() []byte {
+	pairs := make([][]any, 0)
+	for k, v := range m.internalMap {
+		pairs = append(pairs, []any{k, v.id})
+	}
+	bytes, _ := json.Marshal(pairs)
+	return bytes
+}
+
+func (m Map) save() {
+	for _, v := range m.internalMap {
+		v.saveThunkValue()
+	}
 }
