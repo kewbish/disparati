@@ -18,6 +18,7 @@ func main() {
 	kv := maelstrom.NewLinKV(n)
 	var mx sync.Mutex
 	thunkMap := new(Map)
+	globalIDG := IDGenerator{n, new(sync.Mutex), 0}
 
 	n.Handle("txn", func(msg maelstrom.Message) error {
 		var body map[string]any
@@ -51,7 +52,7 @@ func main() {
 				new_value := make([]interface{}, len(newThunkMap.internalMap[key].value.([]any)))
 				copy(new_value, newThunkMap.internalMap[key].value.([]any))
 				new_value = append(new_value, value)
-				thunk := newThunk(n, kv, fmt.Sprintf("%s-%d", n.ID(), globalIDG.newID()), new_value, false)
+				thunk := newThunk(n, kv, globalIDG.newID(), new_value, false)
 				newInternalMap := make(map[any]*Thunk)
 				for k, v := range newThunkMap.internalMap {
 					newInternalMap[k] = v
@@ -82,17 +83,16 @@ func main() {
 }
 
 type IDGenerator struct {
+	node  *maelstrom.Node
 	lock  *sync.Mutex
 	index int64
 }
 
-var globalIDG IDGenerator = IDGenerator{new(sync.Mutex), 0}
-
-func (idg IDGenerator) newID() int64 {
+func (idg IDGenerator) newID() string {
 	idg.lock.Lock()
 	idg.index += 1
 	idg.lock.Unlock()
-	return idg.index
+	return fmt.Sprintf("%s-%d", (*idg.node).ID(), idg.index)
 }
 
 type Thunk struct {
@@ -107,13 +107,6 @@ func newThunk(node *maelstrom.Node, kv *maelstrom.KV, id string, value any, save
 	thunk := new(Thunk)
 	*thunk = Thunk{node, kv, id, value, saved}
 	return thunk
-}
-
-func (t Thunk) getThunkID() string {
-	if t.id != "" {
-		return t.id
-	}
-	return fmt.Sprintf("%s-%d", (*t.node).ID(), globalIDG.newID())
 }
 
 func (t Thunk) getThunkValue() any {
