@@ -18,6 +18,7 @@ func main() {
 	kv := maelstrom.NewLinKV(n)
 	var mx sync.Mutex
 	thunkMap := new(Map)
+	thunkCache := make(map[string]*Thunk)
 	globalIDG := IDGenerator{n, new(sync.Mutex), 0}
 
 	n.Handle("txn", func(msg maelstrom.Message) error {
@@ -26,7 +27,7 @@ func main() {
 			return err
 		}
 		transaction := body["txn"].([]interface{})
-		mx.Lock()
+
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		value, err := kv.Read(ctx, "root")
@@ -35,8 +36,12 @@ func main() {
 		}
 		thunkMap = thunkMap.fromJSON(n, kv, value.(string))
 
+		mx.Lock()
+
+		wasAppend := false
 		newThunkMap := Map{n, kv, thunkMap.internalMap, thunkMap.id}
 		new_transaction := make([][]interface{}, 0)
+
 		for _, mop := range transaction {
 			mop := mop
 			mop_interface := mop.([]interface{})
@@ -47,16 +52,17 @@ func main() {
 			new_mop[1] = key
 			switch action {
 			case "r":
-				if _, ok := newThunkMap.getThunkValue()[key]; ok {
-					new_mop[2] = newThunkMap.getThunkValue()[key].getThunkValue()
+				if _, ok := newThunkMap.getThunkValue(thunkCache)[key]; ok {
+					new_mop[2] = newThunkMap.getThunkValue(thunkCache)[key].getThunkValue()
 				} else {
 					new_mop[2] = make([]interface{}, 0)
 				}
 			case "append":
+				wasAppend = true
 				new_mop[2] = value
 				var new_value []interface{}
-				if _, ok := newThunkMap.getThunkValue()[key]; ok {
-					thunkValue := newThunkMap.getThunkValue()[key].getThunkValue()
+				if _, ok := newThunkMap.getThunkValue(thunkCache)[key]; ok {
+					thunkValue := newThunkMap.getThunkValue(thunkCache)[key].getThunkValue()
 					new_value = make([]interface{}, len(thunkValue.([]any)))
 					copy(new_value, thunkValue.([]any))
 					new_value = append(new_value, value)
@@ -65,7 +71,7 @@ func main() {
 				}
 				thunk := newThunk(n, kv, globalIDG.newID(), new_value, false)
 				newInternalMap := make(map[any]*Thunk)
-				for k, v := range newThunkMap.getThunkValue() {
+				for k, v := range newThunkMap.getThunkValue(thunkCache) {
 					newInternalMap[k] = v
 				}
 				newInternalMap[key] = thunk
@@ -74,11 +80,18 @@ func main() {
 			new_transaction = append(new_transaction, new_mop)
 		}
 
-		newThunkMap.save(globalIDG.newID())
+		newThunkMap.save(globalIDG.newID(), thunkCache)
+		if wasAppend {
+			for {
+				ctx, cancel_another := context.WithTimeout(context.Background(), timeout)
+				err := kv.CompareAndSwap(ctx, "root", value, newThunkMap.id, true)
+				defer cancel_another()
+				if err == nil {
+					break
+				}
+			}
+		}
 
-		ctx, cancel_another := context.WithTimeout(context.Background(), timeout)
-		kv.CompareAndSwap(context.Background(), "root", value, newThunkMap.id, true) // TODO - add retry
-		defer cancel_another()
 		mx.Unlock()
 
 		body = make(map[string]any)
@@ -124,12 +137,17 @@ func (t *Thunk) getThunkValue() any {
 	if t.value != nil {
 		return t.value
 	}
-	contextWithTimeout, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	value, err := t.kv.Read(contextWithTimeout, t.id)
-	if err != nil {
-		log.Default().Print(err)
-		return nil
+	var value any
+	var err error
+	for {
+		contextWithTimeout, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		value, err = t.kv.Read(contextWithTimeout, t.id)
+		if err != nil {
+			time.Sleep(100 * time.Millisecond)
+		} else {
+			break
+		}
 	}
 	t.value = value
 	return value
@@ -166,7 +184,7 @@ func (Map) fromJSON(node *maelstrom.Node, kv *maelstrom.KV, id string) *Map {
 	return newMap
 }
 
-func (m *Map) save(id string) {
+func (m *Map) save(id string, thunkCache map[string]*Thunk) {
 	for _, v := range m.internalMap {
 		v.saveThunkValue()
 	}
@@ -177,21 +195,32 @@ func (m *Map) save(id string) {
 	}
 	bytes, _ := json.Marshal(pairs)
 
-	mapAsThunk := newThunk(m.node, m.kv, id, string(bytes), false)
+	var mapAsThunk *Thunk
+	if _, ok := thunkCache[id]; ok {
+		mapAsThunk = thunkCache[id]
+	} else {
+		mapAsThunk = newThunk(m.node, m.kv, id, string(bytes), false)
+	}
 	mapAsThunk.saveThunkValue()
 	m.id = id
 }
 
-func (m *Map) getThunkValue() map[any]*Thunk {
+func (m *Map) getThunkValue(thunkCache map[string]*Thunk) map[any]*Thunk {
 	if len(m.internalMap) != 0 || m.id == "" {
 		return m.internalMap
 	}
-	contextWithTimeout, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	value, err := m.kv.Read(contextWithTimeout, m.id)
-	if err != nil {
-		log.Default().Print(err)
-		return nil
+
+	var value any
+	var err error
+	for {
+		contextWithTimeout, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		value, err = m.kv.Read(contextWithTimeout, m.id)
+		if err != nil {
+			time.Sleep(100 * time.Millisecond)
+		} else {
+			break
+		}
 	}
 
 	newInternalMap := make(map[any]*Thunk)
@@ -200,7 +229,11 @@ func (m *Map) getThunkValue() map[any]*Thunk {
 		json.Unmarshal([]byte(value.(string)), &pairs)
 	}
 	for _, pair := range pairs {
-		newInternalMap[pair[0]] = newThunk(m.node, m.kv, pair[1].(string), nil, true)
+		if _, ok := thunkCache[pair[1].(string)]; ok {
+			newInternalMap[pair[0]] = thunkCache[pair[1].(string)]
+		} else {
+			newInternalMap[pair[0]] = newThunk(m.node, m.kv, pair[1].(string), nil, true)
+		}
 	}
 
 	m.internalMap = newInternalMap
