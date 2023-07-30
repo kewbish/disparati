@@ -35,7 +35,7 @@ func main() {
 		}
 		thunkMap = thunkMap.fromJSON(n, kv, []byte(value.(string)))
 
-		newThunkMap := Map{n, kv, thunkMap.internalMap}
+		newThunkMap := Map{&Thunk{n, kv, globalIDG.newID(), thunkMap.value, false}, thunkMap.value}
 		new_transaction := make([][]interface{}, 0)
 		for _, mop := range transaction {
 			mop := mop
@@ -47,16 +47,16 @@ func main() {
 			new_mop[1] = key
 			switch action {
 			case "r":
-				if _, ok := newThunkMap.internalMap[key]; ok {
-					new_mop[2] = newThunkMap.internalMap[key].getThunkValue()
+				if _, ok := newThunkMap.value[key]; ok {
+					new_mop[2] = newThunkMap.value[key].getThunkValue()
 				} else {
 					new_mop[2] = make([]interface{}, 0)
 				}
 			case "append":
 				new_mop[2] = value
 				var new_value []interface{}
-				if _, ok := newThunkMap.internalMap[key]; ok {
-					thunkValue := newThunkMap.internalMap[key].getThunkValue()
+				if _, ok := newThunkMap.value[key]; ok {
+					thunkValue := newThunkMap.value[key].getThunkValue()
 					new_value = make([]interface{}, len(thunkValue.([]any)))
 					copy(new_value, thunkValue.([]any))
 					new_value = append(new_value, value)
@@ -65,16 +65,16 @@ func main() {
 				}
 				thunk := newThunk(n, kv, globalIDG.newID(), new_value, false)
 				newInternalMap := make(map[any]*Thunk)
-				for k, v := range newThunkMap.internalMap {
+				for k, v := range newThunkMap.value {
 					newInternalMap[k] = v
 				}
 				newInternalMap[key] = thunk
-				newThunkMap.internalMap = newInternalMap
+				newThunkMap = Map{&Thunk{n, kv, globalIDG.newID(), newInternalMap, false}, newInternalMap}
 			}
 			new_transaction = append(new_transaction, new_mop)
 		}
 
-		newThunkMap.save()
+		newThunkMap.saveMapThunk()
 
 		ctx, cancel_another := context.WithTimeout(context.Background(), timeout)
 		kv.CompareAndSwap(context.Background(), "root", value, newThunkMap.toJSON(), true) // TODO - add retry
@@ -147,37 +147,48 @@ func (t *Thunk) saveThunkValue() {
 	}
 }
 
+func (t Thunk) toJSON() []byte {
+	bytes, _ := json.Marshal(t.value)
+	return bytes
+}
+
+func (t Thunk) fromJSON(jsonString []byte) any {
+	var value any
+	json.Unmarshal(jsonString, &value)
+	return value
+}
+
 type Map struct {
-	node        *maelstrom.Node
-	kv          *maelstrom.KV
-	internalMap map[any]*Thunk
+	*Thunk
+	value map[any]*Thunk
 }
 
 func (Map) fromJSON(node *maelstrom.Node, kv *maelstrom.KV, jsonString []byte) *Map {
 	newMap := new(Map)
 	newMap.node = node
-	newMap.internalMap = make(map[any]*Thunk)
+	newMap.value = make(map[any]*Thunk)
 	pairs := make([][]any, 0)
 	if len(jsonString) != 0 {
 		json.Unmarshal(jsonString, &pairs)
 	}
 	for _, pair := range pairs {
-		newMap.internalMap[pair[0]] = newThunk(node, kv, pair[1].(string), nil, true)
+		newMap.value[pair[0]] = newThunk(node, kv, pair[1].(string), nil, true)
 	}
 	return newMap
 }
 
 func (m Map) toJSON() string {
 	pairs := make([][]any, 0)
-	for k, v := range m.internalMap {
+	for k, v := range m.value {
 		pairs = append(pairs, []any{k, v.id})
 	}
 	bytes, _ := json.Marshal(pairs)
 	return string(bytes)
 }
 
-func (m Map) save() {
-	for _, v := range m.internalMap {
+func (m Map) saveMapThunk() {
+	for _, v := range m.value {
 		v.saveThunkValue()
 	}
+	m.saveThunkValue()
 }
