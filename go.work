@@ -11,4 +11,5 @@ use (
 	./g-counter-seq-kv
 	./pn-counter
 	./datomic
+    ./raft
 )
