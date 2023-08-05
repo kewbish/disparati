@@ -21,6 +21,8 @@ const (
 
 var timeout time.Duration = 500 * time.Millisecond
 
+// TODO - fix deadlocks in election process!
+
 func main() {
 	n := maelstrom.NewNode()
 	var mx sync.Mutex
@@ -29,7 +31,8 @@ func main() {
 	electionTimeout := 2 * time.Second
 	electionDeadline := time.Now()
 	term := 0
-	// writeAheadLog := RaftLog.NewRaftlog(n)
+	writeAheadLog := NewRaftlog(n)
+	votedFor := ""
 
 	advanceTerm := func(newTerm int) error {
 		mx.Lock()
@@ -38,23 +41,67 @@ func main() {
 			return errors.New("Provided term is before current term")
 		} else {
 			term = newTerm
+			votedFor = ""
 			mx.Unlock()
 		}
 		return nil
 	}
 
+	maybeBecomeFollower := func(considerTerm int) {
+		if term < considerTerm {
+			log.Default().Printf("Became follower, remote term %d higher than local term %d", considerTerm, term)
+			advanceTerm(considerTerm)
+			mx.Lock()
+			nodeState = Follower
+			mx.Unlock()
+		}
+	}
+
+	advanceElectionDeadline := func() {
+		electionDeadline = time.Now().Add(electionTimeout + (time.Duration(int(rand.Float64()*1000)) * time.Millisecond))
+	}
+
+	startElection := func() {
+		mx.Lock()
+		votes := make(map[string]bool)
+		votes[n.ID()] = true
+		votedFor = n.ID()
+		currentTerm := term
+		for _, nodeID := range n.NodeIDs() {
+			request := map[string]any{"type": "request_vote", "term": term, "candidate_id": n.ID, "last_log_index": len(writeAheadLog.log), "last_log_term": writeAheadLog.Last().term}
+			n.RPC(n.ID(), request, func(msg maelstrom.Message) error {
+				var body map[string]any
+				if err := json.Unmarshal(msg.Body, &body); err != nil {
+					return err
+				}
+				responseTerm := body["term"].(int)
+				maybeBecomeFollower(responseTerm)
+				voteGranted := body["vote_granted"].(bool)
+				if nodeState == Candidate && term == currentTerm && term == responseTerm && voteGranted {
+					votes[nodeID] = true
+				}
+				return nil
+			})
+		}
+		mx.Unlock()
+	}
+
 	n.Handle("init", func(msg maelstrom.Message) error {
 		go func() {
-			tick := time.Tick(1 * time.Second)
+			tick := time.Tick(500 * time.Millisecond)
 			for range tick {
+				time.Sleep(time.Duration(rand.Intn(1000)) * time.Millisecond)
 				mx.Lock()
 				if electionDeadline.Before(time.Now()) {
 					if nodeState != Leader {
 						nodeState = Candidate
 						advanceTerm(term + 1)
+						advanceElectionDeadline()
 						log.Default().Printf("Became candidate for term %d", term)
+						startElection()
+					} else {
+						advanceElectionDeadline()
 					}
-					electionDeadline = time.Now().Add(electionTimeout + (time.Duration(int(rand.Float64()*1000)) * time.Millisecond))
 				}
 				mx.Unlock()
 			}
@@ -161,6 +208,43 @@ func main() {
 		return n.Reply(msg, body)
 	})
 
+	n.Handle("request_vote", func(msg maelstrom.Message) error {
+		var body map[string]any
+		if err := json.Unmarshal(msg.Body, &body); err != nil {
+			return err
+		}
+		requestedTerm := body["term"].(int)
+		candidateId := body["candidate_id"].(string)
+		lastLogIndex := body["last_log_index"].(int)
+		lastLogTerm := body["last_log_term"].(int)
+		voteGranted := false
+
+		maybeBecomeFollower(requestedTerm)
+		if requestedTerm < term {
+			log.Default().Printf("Candidate term %d lower than current term %d", requestedTerm, term)
+		} else if votedFor != "" {
+			log.Default().Printf("Voted for %s already in current term", votedFor)
+		} else if lastLogTerm < writeAheadLog.Last().term {
+			log.Default().Printf("Candidate WAL is still on term %d, current WAL on term %d", lastLogTerm, writeAheadLog.Last().term)
+		} else if lastLogTerm == writeAheadLog.Last().term && lastLogIndex < len(writeAheadLog.log) {
+			log.Default().Print("Candidate WAL is shorter than current WAL")
+		} else {
+			log.Default().Printf("Granting vote to candidate %s", candidateId)
+			voteGranted = true
+			mx.Lock()
+			votedFor = candidateId
+			advanceElectionDeadline()
+			mx.Unlock()
+		}
+
+		body = make(map[string]any)
+		body["type"] = "request_vote_res"
+		body["term"] = term
+		body["vote_granted"] = voteGranted
+
+		return n.Reply(msg, body)
+	})
+
 	if err := n.Run(); err != nil {
 		log.Fatal(err)
 	}
@@ -175,7 +259,7 @@ type RaftLog struct {
 	log  []RaftLogEntry
 }
 
-func (RaftLog) NewRaftlog(node *maelstrom.Node) *RaftLog {
+func NewRaftlog(node *maelstrom.Node) *RaftLog {
 	newRaftLog := new(RaftLog)
 	newRaftLog.node = node
 	newRaftLog.log = []RaftLogEntry{{term: 0, operation: nil}}
@@ -192,6 +276,6 @@ func (r *RaftLog) AppendEntries(entries []RaftLogEntry) {
 	}
 }
 
-func (r RaftLog) Last(i int) RaftLogEntry {
+func (r RaftLog) Last() RaftLogEntry {
 	return r.log[len(r.log)-1]
 }
