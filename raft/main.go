@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"math/rand"
 	"sync"
@@ -27,6 +28,20 @@ func main() {
 	nodeState := Follower
 	electionTimeout := 2 * time.Second
 	electionDeadline := time.Now()
+	term := 0
+	// writeAheadLog := RaftLog.NewRaftlog(n)
+
+	advanceTerm := func(newTerm int) error {
+		mx.Lock()
+		if newTerm < term {
+			mx.Unlock()
+			return errors.New("Provided term is before current term")
+		} else {
+			term = newTerm
+			mx.Unlock()
+		}
+		return nil
+	}
 
 	n.Handle("init", func(msg maelstrom.Message) error {
 		go func() {
@@ -36,6 +51,8 @@ func main() {
 				if electionDeadline.Before(time.Now()) {
 					if nodeState != Leader {
 						nodeState = Candidate
+						advanceTerm(term + 1)
+						log.Default().Printf("Became candidate for term %d", term)
 					}
 					electionDeadline = time.Now().Add(electionTimeout + (time.Duration(int(rand.Float64()*1000)) * time.Millisecond))
 				}
@@ -47,12 +64,12 @@ func main() {
 	})
 
 	n.Handle("read", func(msg maelstrom.Message) error {
-		applyRead := func(mapState map[any]any, key any) (newMapState map[any]any, value any, err error) {
+		applyRead := func(mapState map[any]any, key any) (value any, err error) {
 			if v, ok := mapState[key]; ok {
-				return mapState, v, nil
+				return v, nil
 			} else {
 				maelstromError := maelstrom.NewRPCError(404, "Key not found")
-				return mapState, "", maelstromError
+				return "", maelstromError
 			}
 		}
 
@@ -62,10 +79,7 @@ func main() {
 		}
 		key := body["key"]
 
-		mx.Lock()
-		newMapState, value, err := applyRead(mapState, key)
-		mapState = newMapState
-		mx.Unlock()
+		value, err := applyRead(mapState, key)
 		if err != nil {
 			return err
 		}
@@ -94,13 +108,13 @@ func main() {
 		key := body["key"]
 		value := body["value"]
 
-		mx.Lock()
 		newMapState, err := applyWrite(mapState, key, value)
-		mapState = newMapState
-		mx.Unlock()
 		if err != nil {
 			return err
 		}
+		mx.Lock()
+		mapState = newMapState
+		mx.Unlock()
 
 		body = make(map[string]any)
 		body["type"] = "write_ok"
@@ -133,13 +147,13 @@ func main() {
 		from := body["from"]
 		to := body["to"]
 
-		mx.Lock()
 		newMapState, err := applyCAS(mapState, key, from, to)
-		mapState = newMapState
-		mx.Unlock()
 		if err != nil {
 			return err
 		}
+		mx.Lock()
+		mapState = newMapState
+		mx.Unlock()
 
 		body = make(map[string]any)
 		body["type"] = "cas_ok"
@@ -150,4 +164,34 @@ func main() {
 	if err := n.Run(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+type RaftLogEntry struct {
+	term      int
+	operation any
+}
+type RaftLog struct {
+	node *maelstrom.Node
+	log  []RaftLogEntry
+}
+
+func (RaftLog) NewRaftlog(node *maelstrom.Node) *RaftLog {
+	newRaftLog := new(RaftLog)
+	newRaftLog.node = node
+	newRaftLog.log = []RaftLogEntry{{term: 0, operation: nil}}
+	return newRaftLog
+}
+
+func (r RaftLog) Get(i int) RaftLogEntry {
+	return r.log[i-1]
+}
+
+func (r *RaftLog) AppendEntries(entries []RaftLogEntry) {
+	for _, entry := range entries {
+		r.log = append(r.log, entry)
+	}
+}
+
+func (r RaftLog) Last(i int) RaftLogEntry {
+	return r.log[len(r.log)-1]
 }
