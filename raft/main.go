@@ -67,7 +67,6 @@ func main() {
 	}
 
 	startElection := func() {
-		mx.Lock()
 		votes := make(map[string]bool)
 		votes[n.ID()] = true
 		votedFor = n.ID()
@@ -87,6 +86,7 @@ func main() {
 					votes[nodeID] = true
 				}
 				if len(n.NodeIDs())/2+1 <= len(votes) {
+					log.Default().Printf("Became leader for term %d with votes %v", term, votes)
 					mx.Lock()
 					nodeState = Leader
 					mx.Unlock()
@@ -94,8 +94,10 @@ func main() {
 				}
 				return nil
 			})
+			if nodeState == Leader {
+				break
+			}
 		}
-		mx.Unlock()
 	}
 
 	n.Handle("init", func(msg maelstrom.Message) error {
@@ -103,10 +105,11 @@ func main() {
 			tick := time.Tick(500 * time.Millisecond)
 			for range tick {
 				time.Sleep(time.Duration(rand.Intn(1000)) * time.Millisecond)
-				mx.Lock()
 				if electionDeadline.Before(time.Now()) {
 					if nodeState != Leader {
+						mx.Lock()
 						nodeState = Candidate
+						mx.Unlock()
 						advanceTerm(term + 1)
 						advanceElectionDeadline()
 						advanceStepDownDeadline()
@@ -116,7 +119,6 @@ func main() {
 						advanceElectionDeadline()
 					}
 				}
-				mx.Unlock()
 			}
 		}()
 
@@ -125,6 +127,7 @@ func main() {
 			for range tick {
 				mx.Lock()
 				if nodeState == Leader && stepDownDeadline.Before(time.Now()) {
+					log.Default().Printf("Stepping down, have not received any pings in / acks recently")
 					nodeState = Follower
 					advanceElectionDeadline()
 				}
