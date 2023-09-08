@@ -80,6 +80,11 @@ func main() {
 				if nodeState == Candidate && term == currentTerm && term == responseTerm && voteGranted {
 					votes[nodeID] = true
 				}
+				if len(n.NodeIDs())/2+1 <= len(votes) {
+					mx.Lock()
+					nodeState = Leader
+					mx.Unlock()
+				}
 				return nil
 			})
 		}
