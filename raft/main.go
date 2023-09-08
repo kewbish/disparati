@@ -30,6 +30,7 @@ func main() {
 	nodeState := Follower
 	electionTimeout := 2 * time.Second
 	electionDeadline := time.Now()
+	stepDownDeadline := time.Now()
 	term := 0
 	writeAheadLog := NewRaftlog(n)
 	votedFor := ""
@@ -61,6 +62,10 @@ func main() {
 		electionDeadline = time.Now().Add(electionTimeout + (time.Duration(int(rand.Float64()*1000)) * time.Millisecond))
 	}
 
+	advanceStepDownDeadline := func() {
+		stepDownDeadline = time.Now().Add(electionTimeout + (time.Duration(int(rand.Float64()*1000)) * time.Millisecond))
+	}
+
 	startElection := func() {
 		mx.Lock()
 		votes := make(map[string]bool)
@@ -70,6 +75,7 @@ func main() {
 		for _, nodeID := range n.NodeIDs() {
 			request := map[string]any{"type": "request_vote", "term": term, "candidate_id": n.ID, "last_log_index": len(writeAheadLog.log), "last_log_term": writeAheadLog.Last().term}
 			n.RPC(n.ID(), request, func(msg maelstrom.Message) error {
+				advanceStepDownDeadline()
 				var body map[string]any
 				if err := json.Unmarshal(msg.Body, &body); err != nil {
 					return err
@@ -84,6 +90,7 @@ func main() {
 					mx.Lock()
 					nodeState = Leader
 					mx.Unlock()
+					advanceStepDownDeadline()
 				}
 				return nil
 			})
@@ -102,11 +109,24 @@ func main() {
 						nodeState = Candidate
 						advanceTerm(term + 1)
 						advanceElectionDeadline()
+						advanceStepDownDeadline()
 						log.Default().Printf("Became candidate for term %d", term)
 						startElection()
 					} else {
 						advanceElectionDeadline()
 					}
+				}
+				mx.Unlock()
+			}
+		}()
+
+		go func() {
+			tick := time.Tick(500 * time.Millisecond)
+			for range tick {
+				mx.Lock()
+				if nodeState == Leader && stepDownDeadline.Before(time.Now()) {
+					nodeState = Follower
+					advanceElectionDeadline()
 				}
 				mx.Unlock()
 			}
